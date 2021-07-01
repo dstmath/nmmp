@@ -44,7 +44,6 @@ public class MyMethodUtil {
 
         StringBuilder funcName = new StringBuilder("Java_");
 
-
         funcName.append(nameReplace(className).replace('/', '_'));
 
         funcName.append('_');
@@ -86,8 +85,9 @@ public class MyMethodUtil {
                     break;
                 default:
                     if (
-                            ((c & 0xFF) > 0x7F)
+                            ((c & 0xFFFF) > 0x7F)
                     ) {
+                        // 非ascii字符
                         sb.append("_0");
                         sb.append(Hex.u2(c));
                     } else {

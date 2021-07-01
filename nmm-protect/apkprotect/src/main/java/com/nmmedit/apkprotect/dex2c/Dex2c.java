@@ -1,112 +1,32 @@
 package com.nmmedit.apkprotect.dex2c;
 
 import com.google.common.collect.Maps;
+import com.nmmedit.apkprotect.dex2c.converter.ClassAnalyzer;
 import com.nmmedit.apkprotect.dex2c.converter.JniCodeGenerator;
-import com.nmmedit.apkprotect.dex2c.converter.MyMethodUtil;
 import com.nmmedit.apkprotect.dex2c.converter.instructionrewriter.InstructionRewriter;
 import com.nmmedit.apkprotect.dex2c.converter.structs.ClassMethodToNative;
 import com.nmmedit.apkprotect.dex2c.converter.structs.ClassToSymDex;
 import com.nmmedit.apkprotect.dex2c.converter.structs.LoadLibClassDef;
 import com.nmmedit.apkprotect.dex2c.converter.structs.RegisterNativesCallerClassDef;
-import com.nmmedit.apkprotect.dex2c.converter.testbuild.ClassMethodImplCollection;
 import com.nmmedit.apkprotect.dex2c.filters.ClassAndMethodFilter;
-import org.jf.dexlib2.AccessFlags;
 import org.jf.dexlib2.Opcodes;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.DexFile;
-import org.jf.dexlib2.iface.Field;
-import org.jf.dexlib2.iface.Method;
-import org.jf.dexlib2.writer.builder.DexBuilder;
 import org.jf.dexlib2.writer.io.FileDataStore;
 import org.jf.dexlib2.writer.pool.DexPool;
 
-import javax.annotation.Nonnull;
 import java.io.*;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class Dex2c {
 
     public static final String LANDROID_APP_APPLICATION = "Landroid/app/Application;";
 
     private Dex2c() {
-    }
-
-
-    public static ClassAndMethodFilter testFilter = new ClassAndMethodFilter() {
-
-        @Override
-        public boolean acceptClass(ClassDef classDef) {
-            return classDef.getType().startsWith("Ltests/");
-        }
-
-        @Override
-        public boolean acceptMethod(Method method) {
-            return !MyMethodUtil.isConstructorOrAbstract(method) && !AccessFlags.BRIDGE.isSet(method.getAccessFlags());
-        }
-    };
-
-    public static void parseDex(InputStream dexStream) throws IOException {
-        DexBackedDexFile dexFile = DexBackedDexFile.fromInputStream(Opcodes.forApi(21), dexStream);
-        DexPool dexPool = new DexPool(Opcodes.forApi(21));
-        DexPool dexPoolMethodIml = new DexPool(Opcodes.forApi(21));
-
-
-        StringBuilder sb = new StringBuilder();
-
-        for (final ClassDef classDef : dexFile.getClasses()) {
-            if (testFilter.acceptClass(classDef)) {
-                dexPool.internClass(new ClassMethodToNative(classDef, testFilter));
-                dexPoolMethodIml.internClass(new ClassMethodImplCollection(classDef, sb));
-            } else {
-                dexPool.internClass(classDef);
-            }
-        }
-
-        dexPool.writeTo(new FileDataStore(new File("/home/mao/nmmp/classes2.dex")));
-        dexPoolMethodIml.writeTo(new FileDataStore(new File("/home/mao/nmmp/sym.dat")));
-
-    }
-
-    public static void dex2cTest(File dex, File outDir) throws IOException {
-        DexBackedDexFile dexFile = DexBackedDexFile.fromInputStream(Opcodes.forApi(21),
-                new BufferedInputStream(new FileInputStream(dex)));
-
-        //把方法变为本地方法,所有class运行期
-        DexPool nativeMethodDexPool = new DexPool(Opcodes.forApi(21));
-
-        //
-        DexPool dexPoolMethodIml = new DexPool(Opcodes.forApi(21));
-
-        DexBuilder dexBuilder = new DexBuilder(Opcodes.forApi(21));
-
-        StringBuilder sb = new StringBuilder();
-        for (final ClassDef classDef : dexFile.getClasses()) {
-            if (testFilter.acceptClass(classDef)) {
-                nativeMethodDexPool.internClass(new ClassMethodToNative(classDef, testFilter));
-
-                for (Field field : classDef.getFields()) {
-                    //只需要field符号,用于生成c代码
-                    dexBuilder.internField(field.getDefiningClass(), field.getName(), field.getType(),
-                            field.getAccessFlags(), null, Collections.emptySet(), Collections.emptySet());
-                }
-
-
-                dexPoolMethodIml.internClass(new ClassMethodImplCollection(classDef, sb));
-            } else {
-                nativeMethodDexPool.internClass(classDef);
-            }
-        }
-
-
-        nativeMethodDexPool.writeTo(new FileDataStore(new File(outDir, dex.getName())));
-        dexPoolMethodIml.writeTo(new FileDataStore(new File(outDir, "sym.dat")));
-
-        FileWriter writer = new FileWriter(new File(outDir, "dex2c.cpp"));
-        String s = sb.toString();
-        writer.write(s, 0, s.length());
-        writer.close();
-
     }
 
     /**
@@ -164,44 +84,48 @@ public class Dex2c {
                                       ClassAndMethodFilter filter,
                                       InstructionRewriter instructionRewriter,
                                       File outDir) throws IOException {
-        DexBackedDexFile dexFile = DexBackedDexFile.fromInputStream(
+        DexBackedDexFile originDexFile = DexBackedDexFile.fromInputStream(
                 Opcodes.getDefault(),
                 dex);
 
         //把方法变为本地方法,用它替换掉原本的dex
-        DexPool nativeMethodDexPool = new DexPool(Opcodes.getDefault());
+        DexPool shellDexPool = new DexPool(Opcodes.getDefault());
 
-        DexPool symDexPool = new DexPool(Opcodes.getDefault());
+        DexPool nativeImplDexPool = new DexPool(Opcodes.getDefault());
 
 
-        for (final ClassDef classDef : dexFile.getClasses()) {
+        for (final ClassDef classDef : originDexFile.getClasses()) {
             if (filter.acceptClass(classDef)) {
                 //把需要转换的方法设为native
-                nativeMethodDexPool.internClass(new ClassMethodToNative(classDef, filter));
+                shellDexPool.internClass(new ClassMethodToNative(classDef, filter));
                 //收集所有需要转换的方法生成新dex
-                symDexPool.internClass(new ClassToSymDex(classDef, filter));
+                nativeImplDexPool.internClass(new ClassToSymDex(classDef, filter));
             } else {
                 //不需要处理的class,直接复制
-                nativeMethodDexPool.internClass(classDef);
+                shellDexPool.internClass(classDef);
             }
         }
         DexConfig config = new DexConfig(outDir, dexFileName);
 
 
         //写入需要运行的dex
-        nativeMethodDexPool.writeTo(new FileDataStore(config.getNativeDexFile()));
+        shellDexPool.writeTo(new FileDataStore(config.getShellDexFile()));
         //写入符号dex
-        symDexPool.writeTo(new FileDataStore(config.getSymbolDexFile()));
+        nativeImplDexPool.writeTo(new FileDataStore(config.getImplDexFile()));
 
 
-        final DexBackedDexFile symDexFile = DexBackedDexFile.fromInputStream(Opcodes.getDefault(),
-                new BufferedInputStream(new FileInputStream(config.getSymbolDexFile())));
+        final DexBackedDexFile nativeImplDexFile = DexBackedDexFile.fromInputStream(Opcodes.getDefault(),
+                new BufferedInputStream(new FileInputStream(config.getImplDexFile())));
 
         //根据符号dex生成c代码
         try (FileWriter nativeCodeWriter = new FileWriter(config.getNativeFunctionsFile());
              FileWriter resolverWriter = new FileWriter(config.getResolverFile());
         ) {
-            JniCodeGenerator codeGenerator = new JniCodeGenerator(symDexFile, instructionRewriter);
+            final ClassAnalyzer classAnalyzer = new ClassAnalyzer(originDexFile);
+            JniCodeGenerator codeGenerator = new JniCodeGenerator(nativeImplDexFile,
+                    classAnalyzer,
+                    instructionRewriter);
+
             codeGenerator.generate(
                     config,
                     resolverWriter,
@@ -244,7 +168,7 @@ public class Dex2c {
 
         DexBackedDexFile dexNativeFile = DexBackedDexFile.fromInputStream(
                 Opcodes.getDefault(),
-                new BufferedInputStream(new FileInputStream(config.getNativeDexFile())));
+                new BufferedInputStream(new FileInputStream(config.getShellDexFile())));
 
         List<DexPool> dexPools = new ArrayList<>();
         dexPools.add(lastDexPool);
@@ -265,7 +189,7 @@ public class Dex2c {
     }
 
     public static void internClass(DexConfig config, DexPool dexPool, ClassDef classDef) {
-        final Set<String> classes = config.getNativeClasses();
+        final Set<String> classes = config.getHandledNativeClasses();
         final String type = classDef.getType();
         final String className = type.substring(1, type.length() - 1);
         if (classes.contains(className)) {
@@ -286,9 +210,9 @@ public class Dex2c {
      * @param dexFile
      * @param newType
      */
-    public static void addApplicationClass(@Nonnull DexFile dexFile,
-                                           @Nonnull DexPool newDex,
-                                           @Nonnull final String newType) {
+    public static void addApplicationClass(DexFile dexFile,
+                                           DexPool newDex,
+                                           final String newType) {
 
         ClassDef appDirectSubClassDef = null;
         List<ClassDef> parents = getClassDefParents(dexFile.getClasses(), newType, LANDROID_APP_APPLICATION);
@@ -310,11 +234,9 @@ public class Dex2c {
     }
 
     //查找某个类所有父类
-    @Nonnull
-    private static List<ClassDef> getClassDefParents(@Nonnull final Set<? extends ClassDef> classes, @Nonnull String type, @Nonnull String rootType) {
+    private static List<ClassDef> getClassDefParents(final Set<? extends ClassDef> classes, String type, String rootType) {
         String tmpType = type;
         final ArrayList<ClassDef> parents = new ArrayList<>();
-
 
         //创建类型名和classDef对应关系
         final Map<String, ClassDef> classDefMap = Maps.newHashMap();
@@ -335,9 +257,6 @@ public class Dex2c {
             tmpType = classDef.getSuperclass();
             parents.add(classDef);
         }
-
         return parents;
     }
-
-
 }

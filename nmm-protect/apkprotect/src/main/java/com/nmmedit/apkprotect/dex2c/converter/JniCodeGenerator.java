@@ -23,23 +23,27 @@ import java.util.*;
  */
 
 public class JniCodeGenerator {
-
-
     private final boolean isRegisterNative;
-    private final HashMultimap<String, MyMethod> nativeMethods = HashMultimap.create();
+
+    private final HashMultimap<String, MyMethod> handledNativeMethods = HashMultimap.create();
+
     private final Map<String, Integer> nativeMethodOffsets = new HashMap<>();
     private final ResolverCodeGenerator resolverCodeGenerator;
     private final InstructionRewriter instructionRewriter;
     private final DexBackedDexFile dexFile;
 
     public JniCodeGenerator(@Nonnull DexBackedDexFile dexFile,
+                            @Nonnull ClassAnalyzer analyzer,
                             @Nonnull InstructionRewriter instructionRewriter) {
         this.dexFile = dexFile;
-        this.instructionRewriter = instructionRewriter;
-        instructionRewriter.loadDexFile(dexFile);
 
 //      根据dex里字符串常量,类型常量等生成符号解析代码,给vm提供符号信息
-        resolverCodeGenerator = new ResolverCodeGenerator(dexFile);
+        resolverCodeGenerator = new ResolverCodeGenerator(dexFile, analyzer);
+
+        this.instructionRewriter = instructionRewriter;
+
+        instructionRewriter.loadReferences(resolverCodeGenerator.getReferences(), analyzer);
+
         this.isRegisterNative = true;
     }
 
@@ -62,7 +66,7 @@ public class JniCodeGenerator {
 
         String clazzName = classType.substring(1, classType.length() - 1);
 
-        nativeMethods.put(clazzName, new MyMethod(clazzName, methodName, parameterTypes, returnType));
+        handledNativeMethods.put(clazzName, new MyMethod(clazzName, methodName, parameterTypes, returnType));
 
         writer.write(String.format("%s %s %s(JNIEnv *env, %s ",
                 isRegisterNative ? "static" : "JNIEXPORT",
@@ -71,9 +75,7 @@ public class JniCodeGenerator {
                 isStatic ? "jclass jcls" : "jobject thiz")
         );
 
-
 //        --------jni函数定义及参数赋值-------
-
 
         //如果寄存器数量比较小直接使用栈上内存,不自己分配和释放
         boolean useStack = registerCount <= 8;
@@ -99,11 +101,10 @@ public class JniCodeGenerator {
         } else {
             //一次同时分配寄存器及它的状态所需内存
             regsAssign = new StringBuilder(String.format(
-                    "    const u2 flags_count = %d / sizeof(regptr_t) + ((%d %% sizeof(regptr_t)) ? 1 : 0);\n" +
-                            "    regptr_t *regs = (regptr_t *) calloc(%d, sizeof(regptr_t) + flags_count);\n",
-                    registerCount, registerCount, registerCount));
+                    "    regptr_t *regs = (regptr_t *) calloc(%d, sizeof(regptr_t) + sizeof(u1));\n",
+                    registerCount));
 
-            //寄存器后面部分是寄存器状态数组,一个状态一个字节
+            //寄存器后面部分是寄存器状态数组,和寄存器数量一一对应
             regFlagsAssign = new StringBuilder(
                     String.format("    u1 *reg_flags = ((u1 *) regs) + (%d * sizeof(regptr_t));\n", registerCount));
         }
@@ -157,7 +158,7 @@ public class JniCodeGenerator {
 
         writer.append("    static const u2 insns[] = {");
 
-        final byte[] instructionData = instructionRewriter.instructionRewriter(implementation);
+        final byte[] instructionData = instructionRewriter.rewriteInstructions(implementation);
         final int dataLength = instructionData.length;
         //生成字节码数组
         final DexBuffer instructionBuf = new DexBuffer(instructionData);
@@ -209,7 +210,6 @@ public class JniCodeGenerator {
             writer.write("    free(regs);\n");
         }
 
-
         //根据返回类型处理jvalue
         if (!returnType.equals("V")) {
             char typeCh = returnType.charAt(0);
@@ -217,14 +217,11 @@ public class JniCodeGenerator {
                     String.format("    return value.%s;\n", Character.toLowerCase(typeCh == '[' ? 'L' : typeCh))
             );
         }
-
         writer.append("}\n\n");
-
     }
 
-
-    public Set<String> getNativeClasses() {
-        return nativeMethods.keySet();
+    public Set<String> getHandledNativeClasses() {
+        return handledNativeMethods.keySet();
     }
 
     //必须在产生代码后调用才有效果
@@ -262,14 +259,11 @@ public class JniCodeGenerator {
             for (DexBackedMethod method : classDef.getMethods()) {
                 addMethod(method, codeWriter);
             }
-
         }
-
 
         generateNativeMethodCode(config, codeWriter);
 
         codeWriter.write(String.format("void %s(JNIEnv *env) {\n", config.getHeaderFileAndSetupFunc().setupFunctionName));
-
 
         codeWriter.write("\n    //符号解析器初始化\n");
         codeWriter.write("    resolver_init(env);\n\n");
@@ -295,7 +289,6 @@ public class JniCodeGenerator {
         }
         codeWriter.write("}\n");
 
-
         codeWriter.write(
                 "\n\n#ifdef __cplusplus\n" +
                         "}\n" +
@@ -319,13 +312,14 @@ public class JniCodeGenerator {
 
         int methodIdx = 0;
         writer.write("static const MyNativeMethod gNativeMethods[] = {\n");
-        for (String clazz : nativeMethods.keySet()) {
+        final References references = resolverCodeGenerator.getReferences();
+        for (String clazz : handledNativeMethods.keySet()) {
 
             int startIdx = methodIdx;
-            Set<MyMethod> methods = nativeMethods.get(clazz);
+            Set<MyMethod> methods = handledNativeMethods.get(clazz);
             for (MyMethod method : methods) {
-                int nameIdx = resolverCodeGenerator.getIndexByString(method.name);
-                int sigIdx = resolverCodeGenerator.getIndexByString(MyMethodUtil.getMethodSignature(method.parameterTypes, method.returnType));
+                int nameIdx = references.getStringItemIndex(method.name);
+                int sigIdx = references.getStringItemIndex(MyMethodUtil.getMethodSignature(method.parameterTypes, method.returnType));
                 writer.write(String.format(
                         "    {%d, %d, (void *) %s},\n",
                         nameIdx, sigIdx,
@@ -353,7 +347,7 @@ public class JniCodeGenerator {
         for (Map.Entry<String, Ranger> entry : methodRanger.entrySet()) {
             Ranger ranger = entry.getValue();
             final String className = entry.getKey();
-            int classIdx = resolverCodeGenerator.getIndexByClassName(className);
+            int classIdx = references.getClassNameItemIndex(className);
             writer.write(String.format("    {.classIdx = %d, .offset = %d, .count = %d},\n", classIdx, ranger.start, ranger.count));
             nativeMethodOffsets.put(className, dataOff++);
         }
@@ -399,7 +393,6 @@ public class JniCodeGenerator {
                 , funName)
         );
     }
-
 
     public static String getJNIType(String type) {
         switch (type) {

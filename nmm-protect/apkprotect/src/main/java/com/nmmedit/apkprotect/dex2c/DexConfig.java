@@ -14,9 +14,8 @@ public class DexConfig {
     private final File outputDir;
     private final String dexName;
 
-
     //jnicodegenerator 处理完成后,缓存已处理的类及方法
-    private Set<String> nativeClasses;
+    private Set<String> handledNativeClasses;
     private Map<String, Integer> nativeMethodOffsets;
 
     public DexConfig(File outputDir, String dexFileName) {
@@ -47,8 +46,8 @@ public class DexConfig {
     }
 
     @Nonnull
-    public Set<String> getNativeClasses() {
-        return nativeClasses;
+    public Set<String> getHandledNativeClasses() {
+        return handledNativeClasses;
     }
 
     public int getOffsetFromClassName(String className) {
@@ -56,23 +55,22 @@ public class DexConfig {
     }
 
     public void setResult(JniCodeGenerator codeGenerator) {
-        nativeClasses = codeGenerator.getNativeClasses();
+        handledNativeClasses = codeGenerator.getHandledNativeClasses();
         nativeMethodOffsets = codeGenerator.getNativeMethodOffsets();
     }
-
 
     /**
      * 方法被标识为native的dex,用于替换原dex
      */
-    public File getNativeDexFile() {
-        return new File(outputDir, dexName + "_native.dex");
+    public File getShellDexFile() {
+        return new File(outputDir, dexName + "_shell.dex");
     }
 
     /**
-     * 符号dex文件,用于生成c代码
+     * 符号及方法实现dex文件,用于生成c代码
      */
-    public File getSymbolDexFile() {
-        return new File(outputDir, dexName + "_sym.dex");
+    public File getImplDexFile() {
+        return new File(outputDir, dexName + "_impl.dex");
     }
 
     /**
@@ -91,7 +89,6 @@ public class DexConfig {
                 dexName + "_setup");
 
     }
-
 
     /**
      * 符号解析器代码文件
